@@ -1,0 +1,7 @@
+﻿soju
+beer
+white_wine
+red_wine
+whisky
+sparkling_wine
+sake

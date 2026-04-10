@@ -1,80 +1,227 @@
-# AI
+﻿# Alcoholic-AI
 
-## 1. 저장소 목적
-이 저장소는 **술안주 추천 AI 냉장고의 식재료/주류 인식 모델과 배포용 추론 자산**을 담당합니다.
+Alcoholic-AI is the AI repository for the smart fridge project. This repository now contains the migrated ingredient-recognition baseline that was originally developed and validated on Jetson Orin Nano with a Logitech C920 USB camera.
 
-프로젝트 계획서 기준으로 AI 파트는 다음 내용을 포함합니다.
-- CNN 기반 식재료 인식 모델 학습
-- CNN 기반 주류 인식 모델 학습
-- 공개 데이터셋 + 실제 촬영 데이터셋 구축
-- PyTorch -> ONNX -> TensorRT 최적화
-- Jetson Orin Nano 배포용 추론 모듈 구성
+The repository is intended to cover:
 
-## 2. 주요 역할
-- 식재료 인식 모델 학습 및 평가
-- 주류 카테고리 인식 모델 학습 및 평가
-- 데이터셋 정제 및 증강
-- 모델 export 및 최적화
-- 배포용 inference 인터페이스 제공
+- ingredient recognition model training and evaluation
+- alcohol category recognition model training and evaluation
+- dataset preparation and label management
+- Jetson deployment-oriented inference utilities
+- future ONNX and TensorRT export workflows
 
-## 3. 데이터셋 개요
-계획서 기준 식재료 인식 모델은 **총 30개 식재료 클래스**를 대상으로 하며,
-- 28개 클래스는 공개 데이터셋 사용
-- 소고기, 돼지고기 2개 클래스는 실제 촬영 데이터로 보강
-구조를 따릅니다.
+## Current Status
 
-또한 실제 촬영 데이터는 시점, 거리, 냉장고 내부 조명, 포장 상태 등을 반영해 수집합니다.
+The most complete implemented module in this repository today is the ingredient-recognition baseline.
 
-## 4. 권장 구조
-```bash
-datasets/
-  raw/
-  processed/
-  annotations/
-models/
-training/
-export/
-inference/
-configs/
-notebooks/
-scripts/
+Current implemented scope:
+
+- dataset inspection scripts
+- ingredient dataset build script
+- Jetson camera smoke test, preview, and capture scripts
+- ingredient training script
+- ingredient experiment sweep script
+- metadata-driven image inference
+- metadata-driven webcam inference
+- alcohol recognition scaffold and label definitions
+
+Not fully implemented yet:
+
+- alcohol model training pipeline end-to-end
+- ONNX export
+- TensorRT export
+- unified deployment runner
+
+## Important Camera Assumption
+
+The current camera is external-facing, mounted above the fridge and pointing outward.
+
+It is meant to observe:
+
+- ingredients being inserted or removed in front of the fridge
+- alcohol bottles or cans shown by the user in front of the camera
+
+This is not currently an inside-fridge multi-object detection pipeline.
+
+## Migrated Ingredient Baseline
+
+Stable 19 ingredient classes:
+
+- bacon
+- bread
+- broccoli
+- butter
+- carrot
+- cheese
+- chicken
+- cucumber
+- egg
+- fish
+- lettuce
+- milk
+- onion
+- pepper
+- potato
+- sausage
+- spinach
+- tomato
+- yogurt
+
+Confirmed dataset size used for the current stable ingredient classifier:
+
+- train: 26693
+- val: 6536
+- test: 8628
+
+## Best Confirmed Results
+
+Best accuracy model:
+
+- run: `stage1_efficientnet_b0_lr0p0003_bs16_ep5`
+- model: `efficientnet_b0`
+- lr: `3e-4`
+- batch size: `16`
+- epochs: `5`
+- best val acc: `0.8141`
+- test acc: `0.8719`
+
+Best deployment candidate:
+
+- run: `stage1_mobilenet_v3_large_lr0p0003_bs16_ep5`
+- model: `mobilenet_v3_large`
+- lr: `3e-4`
+- batch size: `16`
+- epochs: `5`
+- best val acc: `0.8023`
+- test acc: `0.8666`
+
+Important finding:
+
+- longer 10-epoch stage-2 runs did not beat the best 5-epoch winner
+- with the current data and augmentation setup, the strongest confirmed runs peaked around 5 epochs
+
+Detailed experiment history is documented in `docs/experiments/ingredient_baseline_results.md`.
+
+## Repository Layout
+
+```text
+Alcoholic-AI/
+|-- README.md
+|-- CONTRIBUTING.md
+|-- .gitignore
+|-- assets/
+|   `-- labels/
+|-- configs/
+|-- docs/
+|   |-- architecture/
+|   |-- experiments/
+|   `-- setup/
+|-- requirements-host-cv.txt
+|-- requirements-jetson-train.txt
+|-- scripts/
+|   |-- camera/
+|   `-- data_prep/
+`-- src/
+    |-- alcohol_recognition/
+    |-- common/
+    `-- ingredient_recognition/
 ```
 
-## 5. 개발 원칙
-- 학습 코드와 추론 코드를 분리합니다.
-- 실험성 코드와 배포 코드를 분리합니다.
-- 모델 파일명에는 버전과 목적을 명시합니다.
-- 데이터셋 변경 시 변경 이유를 기록합니다.
+This structure preserves the currently working ingredient pipeline so the team can continue model improvement without first refactoring everything.
 
-## 6. 배포 흐름
-기본 흐름은 아래와 같습니다.
-1. PyTorch 학습
-2. ONNX 변환
-3. TensorRT 엔진 최적화
-4. Jetson 배포
-5. 실시간 추론
+## Key Files
 
-## 7. 실행 방법
+Ingredient pipeline:
+
+- `src/ingredient_recognition/train.py`
+- `src/ingredient_recognition/sweep.py`
+- `src/ingredient_recognition/infer_image.py`
+- `src/ingredient_recognition/infer_webcam.py`
+
+Shared helpers:
+
+- `src/common/ingredient_models.py`
+- `src/common/project_paths.py`
+
+Dataset scripts:
+
+- `scripts/data_prep/inspect_dataset.py`
+- `scripts/data_prep/build_ingredient_dataset.py`
+
+Camera scripts:
+
+- `scripts/camera/cam_smoke_test.py`
+- `scripts/camera/preview_cam.py`
+- `scripts/camera/capture_dataset.py`
+
+Labels and configs:
+
+- `assets/labels/ingredient_labels_stable19.txt`
+- `assets/labels/ingredient_labels.txt`
+- `assets/labels/alcohol_labels.txt`
+- `configs/ingredient_stable19_baseline.yaml`
+- `configs/alcohol_baseline.yaml`
+
+## Setup Notes
+
+Working Jetson environment details are documented in:
+
+- `docs/setup/README.md`
+- `docs/setup/jetson_env_working.md`
+
+## Typical Commands
+
+Inspect datasets:
+
 ```bash
-# example
-pip install -r requirements.txt
-python training/train.py
-python export/export_onnx.py
-python inference/run.py
+python scripts/data_prep/inspect_dataset.py data/external/multi_class_food_image_dataset
+python scripts/data_prep/inspect_dataset.py data/external/grocery_store_dataset
 ```
 
-## 8. 환경 변수/설정 예시
+Build ingredient dataset:
+
 ```bash
-DATASET_ROOT=
-MODEL_OUTPUT_DIR=
-ONNX_OUTPUT_DIR=
-TENSORRT_OUTPUT_DIR=
-DEVICE=
+python scripts/data_prep/build_ingredient_dataset.py
 ```
 
-## 9. AI에서 특히 중요하게 볼 것
-- 데이터셋 버전 관리
-- 클래스 정의 일관성
-- 학습/검증/테스트 분리
-- export 후 추론 결과 검증
-- Jetson 환경에서의 최적화 여부
+Train best-accuracy ingredient candidate:
+
+```bash
+python src/ingredient_recognition/train.py \
+  --model-name efficientnet_b0 \
+  --lr 3e-4 \
+  --batch-size 16 \
+  --epochs 5 \
+  --device cuda \
+  --run-name stage1_efficientnet_b0_lr0p0003_bs16_ep5
+```
+
+Run ingredient sweep:
+
+```bash
+python src/ingredient_recognition/sweep.py
+```
+
+Run image inference:
+
+```bash
+python src/ingredient_recognition/infer_image.py \
+  --image path/to/image.jpg \
+  --meta checkpoints/ingredient/stage1_efficientnet_b0_lr0p0003_bs16_ep5_meta.json
+```
+
+Run webcam inference:
+
+```bash
+python src/ingredient_recognition/infer_webcam.py \
+  --meta checkpoints/ingredient/stage1_mobilenet_v3_large_lr0p0003_bs16_ep5_meta.json \
+  --device cuda
+```
+
+## Next Recommended Work
+
+1. continue improving ingredient recognition with real captured samples
+2. add beef and pork data properly
+3. implement alcohol training, evaluation, and webcam inference in the same style
+4. add ONNX export and validate export parity
+5. add TensorRT conversion and Jetson runtime benchmarking

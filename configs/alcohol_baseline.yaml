@@ -1,0 +1,18 @@
+﻿dataset_root: data/processed/alcohol_cls
+labels_file: assets/labels/alcohol_labels.txt
+
+image_size: 224
+batch_size: 16
+num_workers: 0
+
+model_name: mobilenet_v3_small
+pretrained: true
+num_classes: 7
+
+epochs: 5
+lr: 0.0003
+weight_decay: 0.0001
+
+device: cuda
+save_dir: checkpoints/alcohol
+run_name: alcohol_mobilenetv3_small_baseline

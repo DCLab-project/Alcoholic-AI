@@ -1,0 +1,18 @@
+dataset_root: data/processed/ingredient_cls
+labels_file: assets/labels/ingredient_labels.txt
+
+image_size: 224
+batch_size: 32
+num_workers: 2
+
+model_name: mobilenet_v3_small
+pretrained: true
+num_classes: 26
+
+epochs: 10
+lr: 0.001
+weight_decay: 0.0001
+
+device: cuda
+save_dir: checkpoints/ingredient
+run_name: mobilenetv3_small_baseline

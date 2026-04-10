@@ -1,0 +1,18 @@
+dataset_root: data/processed/ingredient_cls
+labels_file: assets/labels/ingredient_labels_stable19.txt
+
+image_size: 224
+batch_size: 16
+num_workers: 0
+
+model_name: mobilenet_v3_large
+pretrained: true
+num_classes: 19
+
+epochs: 5
+lr: 0.0003
+weight_decay: 0.0001
+
+device: cuda
+save_dir: checkpoints/ingredient
+run_name: stage1_mobilenet_v3_large_lr0p0003_bs16_ep5
