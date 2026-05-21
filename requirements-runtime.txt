@@ -1,0 +1,8 @@
+# Runtime helpers only.
+#
+# Install Jetson-compatible torch/torchvision separately first.
+# OpenCV is often installed from Jetson system packages; install cv2 separately
+# if `python3 -c "import cv2"` fails.
+
+numpy==1.26.1
+Pillow>=10,<12

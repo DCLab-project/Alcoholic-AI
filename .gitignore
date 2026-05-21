@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime noise
+*.log
+logs/
+outputs/
+runs/
+
+# Local data and build outputs
+data/
+src/arduino/.pio/
+
+# Training/evaluation code is intentionally not part of this runtime branch.
+scripts/
+src/ingredient_recognition/
+src/common/jetson_sensor_reader
+src/common/jetson_sensor_reader.cpp
+
+# Keep only the deployed model artifacts in git.
+checkpoints/ingredient/*
+!checkpoints/ingredient/public_local_30class_mobilenet_v3_large_ep10_best.pth
+!checkpoints/ingredient/public_local_30class_mobilenet_v3_large_ep10_meta.json
+
+checkpoints/liquor/*
+!checkpoints/liquor/public_local_7class_liquor_mobilenet_v3_large_ep5_best.pth
+!checkpoints/liquor/public_local_7class_liquor_mobilenet_v3_large_ep5_meta.json
