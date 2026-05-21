@@ -34,13 +34,15 @@ Arduino가 보내는 센서 코드는 Jetson 내부 모드 전환에만 사용�
 - 5초 동안 가장 많이 나온 class 1개만 `/api/v1/recognitions/liquor`로 POST합니다.
 - 예: `red_wine` 30회, `sake` 10회, `soju` 2회면 `red_wine` 전송.
 
-식재료 인식:
+식재료 재고 이벤트:
 
 - 상태 `2`에서 OpenCV 추적이 시작되면 ingredient 모델의 top-1 결과를 투표합니다.
 - 추적 중 bbox 중심이 화면 위/아래 가장자리 15% 구간을 벗어나 충분히 보이는 프레임만 투표에 포함합니다.
 - 그중 top-1 confidence가 50%를 넘은 예측만 투표에 포함합니다.
-- 추적이 끝나면 투표에 포함된 class 중 가장 많이 나온 class 1개만 `/api/v1/recognitions/ingredients`로 POST합니다.
-- 투표에 포함된 예측이 하나도 없으면 POST하지 않습니다.
+- 추적이 끝나면 투표에 포함된 class 중 가장 많이 나온 class 1개와 direction을 확정합니다.
+- direction이 `input`이면 `/api/v1/inventory/events`로 `action=add`를 POST합니다.
+- direction이 `output`이면 `/api/v1/inventory/events`로 `action=subtract`를 POST합니다.
+- direction이 불명확하거나 투표에 포함된 예측이 하나도 없으면 POST하지 않습니다.
 - 예: `tofu` 20회, `onion` 5회, `broccoli` 2회면 `tofu` 전송.
 
 식재료 vote 세부 기준:
@@ -57,7 +59,7 @@ Arduino가 보내는 센서 코드는 Jetson 내부 모드 전환에만 사용�
 - 상태 `2`에서만 OpenCV 움직임 추적을 켭니다.
 - 화면 위쪽에서 나타나 아래쪽으로 사라지면 `input`을 표시합니다.
 - 화면 아래쪽에서 나타나 위쪽으로 사라지면 `output`을 표시합니다.
-- 같은 추적 세션을 기준으로 ingredient recognition POST도 확정합니다.
+- 같은 추적 세션을 기준으로 inventory event POST도 확정합니다.
 
 라벨 보정:
 
@@ -173,15 +175,32 @@ checkpoints/
 POST /api/v1/sensors/events
 ```
 
-인식 결과:
+주류 인식 결과:
 
 ```http
-POST /api/v1/recognitions/ingredients
 POST /api/v1/recognitions/liquor
+```
+
+식재료 재고 이벤트:
+
+```http
+POST /api/v1/inventory/events
+```
+
+payload 예시:
+
+```json
+{
+  "ingredient_name": "green_onion",
+  "action": "add",
+  "quantity": 1,
+  "confidence": 0.93,
+  "source": "jetson-ingredient-tracker"
+}
 ```
 
 기본 source:
 
-- `jetson-ingredient-classifier`
+- `jetson-ingredient-tracker`
 - `jetson-liquor-classifier`
 - `arduino`

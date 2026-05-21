@@ -177,6 +177,7 @@ class DirectionTracker:
     started_this_frame: bool = False
     finished_this_frame: bool = False
     seen_this_frame: bool = False
+    finished_direction: str = ""
 
     def reset(self, clear_event: bool = False) -> None:
         self.subtractor = None
@@ -188,6 +189,7 @@ class DirectionTracker:
         self.started_this_frame = False
         self.finished_this_frame = False
         self.seen_this_frame = False
+        self.finished_direction = ""
         if clear_event:
             self.last_event = ""
             self.event_until = 0.0
@@ -211,6 +213,7 @@ class DirectionTracker:
         self.started_this_frame = False
         self.finished_this_frame = False
         self.seen_this_frame = False
+        self.finished_direction = ""
 
         if not self.enabled:
             return ""
@@ -236,12 +239,13 @@ class DirectionTracker:
             if self.active:
                 self.lost_frames += 1
                 if self.lost_frames >= max(1, self.lost_frames_required):
-                    self.finalize_track(frame_height=h, now=now)
+                    event = self.finalize_track(frame_height=h, now=now)
                     self.active = False
                     self.points.clear()
                     self.lost_frames = 0
                     self.bbox = None
                     self.finished_this_frame = True
+                    self.finished_direction = event
             return self.current_event(now)
 
         center_x, center_y, bbox = detected
@@ -355,7 +359,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-be-post", action="store_true")
     parser.add_argument("--be-base-url", default="")
     parser.add_argument("--sensor-events-url", default="")
-    parser.add_argument("--ingredient-recognition-url", default="")
+    parser.add_argument("--inventory-events-url", default="")
     parser.add_argument("--liquor-recognition-url", default="")
     parser.add_argument("--device-id", default="jetson-arduino-bridge")
     parser.add_argument("--sensor-source", default="arduino")
@@ -591,6 +595,31 @@ def make_recognition_payload(
         payload["scan_request_id"] = scan_request_id
 
     return endpoint_kind, payload
+
+
+def make_inventory_event_payload(
+    label: str,
+    direction: str,
+    confidence: float,
+) -> dict[str, Any] | None:
+    canonical_label = canonicalize_label(MODE_INGREDIENT, label)
+    if canonical_label not in INGREDIENT_CANONICAL_KEYS:
+        print(f"[WARN] ingredient label is not in canonical list: {canonical_label}")
+
+    if direction == "input":
+        action = "add"
+    elif direction == "output":
+        action = "subtract"
+    else:
+        return None
+
+    return {
+        "ingredient_name": canonical_label,
+        "action": action,
+        "quantity": 1,
+        "confidence": float(confidence),
+        "source": "jetson-ingredient-tracker",
+    }
 
 
 def post_json(url: str, payload: dict[str, Any], timeout: float) -> tuple[bool, int | None, str]:
@@ -959,11 +988,11 @@ def maybe_finalize_liquor_vote(
     )
 
 
-def maybe_finalize_ingredient_vote(
+def maybe_finalize_ingredient_inventory_event(
     runtime_model: LoadedModel,
     post_queue: queue.Queue[tuple[str, str, dict[str, Any]]] | None,
-    ingredient_url: str,
-    scan_request_id: str,
+    inventory_url: str,
+    direction: str,
     min_confidence: float,
     now: float,
 ) -> None:
@@ -984,18 +1013,21 @@ def maybe_finalize_ingredient_vote(
         return
 
     label, count, total, confidence = winner
-    _endpoint_kind, payload = make_recognition_payload(
-        mode=MODE_INGREDIENT,
+    payload = make_inventory_event_payload(
         label=label,
+        direction=direction,
         confidence=confidence,
-        scan_request_id=scan_request_id,
     )
-    enqueue_post(post_queue, "recognition:ingredient", ingredient_url, payload)
+    if payload is None:
+        print(f"[VOTE] ingredient skipped: unclear direction={direction!r}")
+        return
+
+    enqueue_post(post_queue, "inventory:ingredient", inventory_url, payload)
     runtime_model.last_sent_label = label
     runtime_model.last_sent_time = now
     print(
-        f"[VOTE] ingredient winner={label} votes={count}/{total} "
-        f"avg_conf={confidence * 100:.1f}%"
+        f"[VOTE] ingredient inventory={label} direction={direction} "
+        f"action={payload['action']} votes={count}/{total} avg_conf={confidence * 100:.1f}%"
     )
 
 
@@ -1185,10 +1217,10 @@ def main() -> None:
         args.sensor_events_url,
         "/api/v1/sensors/events",
     )
-    ingredient_recognition_url = build_url(
+    inventory_events_url = build_url(
         args.be_base_url,
-        args.ingredient_recognition_url,
-        "/api/v1/recognitions/ingredients",
+        args.inventory_events_url,
+        "/api/v1/inventory/events",
     )
     liquor_recognition_url = build_url(
         args.be_base_url,
@@ -1200,8 +1232,8 @@ def main() -> None:
         missing = []
         if not sensor_events_url:
             missing.append("sensor events URL")
-        if not ingredient_recognition_url:
-            missing.append("ingredient recognition URL")
+        if not inventory_events_url:
+            missing.append("inventory events URL")
         if not liquor_recognition_url:
             missing.append("liquor recognition URL")
         if missing:
@@ -1236,7 +1268,7 @@ def main() -> None:
         post_thread.start()
         print("[INFO] BE POST enabled")
         print(f"[INFO] sensor events URL: {sensor_events_url}")
-        print(f"[INFO] ingredient URL: {ingredient_recognition_url}")
+        print(f"[INFO] inventory URL: {inventory_events_url}")
         print(f"[INFO] liquor URL: {liquor_recognition_url}")
 
     cap = open_camera(args.camera, args.width, args.height)
@@ -1330,13 +1362,16 @@ def main() -> None:
                         start_liquor_vote(models[MODE_LIQUOR], now, pir_hold_until)
                 if args.enable_ingredient_direction:
                     if last_mode == MODE_INGREDIENT and active_mode != MODE_INGREDIENT:
-                        direction_tracker.finalize_track(frame_height=frame.shape[0], now=now)
+                        finalized_direction = direction_tracker.finalize_track(
+                            frame_height=frame.shape[0],
+                            now=now,
+                        )
                         if args.enable_be_post:
-                            maybe_finalize_ingredient_vote(
+                            maybe_finalize_ingredient_inventory_event(
                                 runtime_model=models[MODE_INGREDIENT],
                                 post_queue=post_queue,
-                                ingredient_url=ingredient_recognition_url,
-                                scan_request_id=args.scan_request_id,
+                                inventory_url=inventory_events_url,
+                                direction=finalized_direction,
                                 min_confidence=args.ingredient_vote_min_confidence,
                                 now=now,
                             )
@@ -1351,11 +1386,11 @@ def main() -> None:
                 if direction_tracker.started_this_frame:
                     start_ingredient_vote(models[MODE_INGREDIENT], now)
                 if direction_tracker.finished_this_frame and args.enable_be_post:
-                    maybe_finalize_ingredient_vote(
+                    maybe_finalize_ingredient_inventory_event(
                         runtime_model=models[MODE_INGREDIENT],
                         post_queue=post_queue,
-                        ingredient_url=ingredient_recognition_url,
-                        scan_request_id=args.scan_request_id,
+                        inventory_url=inventory_events_url,
+                        direction=direction_tracker.finished_direction,
                         min_confidence=args.ingredient_vote_min_confidence,
                         now=now,
                     )
