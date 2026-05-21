@@ -43,6 +43,15 @@ Arduino가 보내는 센서 코드는 Jetson 내부 모드 전환에만 사용�
 - 투표에 포함된 예측이 하나도 없으면 POST하지 않습니다.
 - 예: `tofu` 20회, `onion` 5회, `broccoli` 2회면 `tofu` 전송.
 
+식재료 vote 세부 기준:
+
+- 추적 범위는 물체가 보이기 시작한 시점부터 사라질 때까지입니다.
+- 방향 판정은 전체 추적 궤적을 사용합니다.
+- class vote는 전체 추적 궤적 중 물체가 충분히 화면 안쪽에 들어온 프레임만 사용합니다.
+- `--ingredient-vote-visible-margin 0.15`는 화면 위/아래 15% 가장자리 구간을 vote에서 제외한다는 뜻입니다.
+- `--ingredient-vote-min-confidence 0.50`은 top-1 confidence가 50%를 초과한 예측만 vote에 넣는다는 뜻입니다.
+- `50.0%`는 초과가 아니므로 vote에 포함되지 않고, `50.1%`부터 포함됩니다.
+
 식재료 이동 방향 표시:
 
 - 상태 `2`에서만 OpenCV 움직임 추적을 켭니다.
@@ -126,6 +135,23 @@ python3 src/common/main_controller.py \
 ```
 
 OpenCV 화면 없이 FE 웹 UI만 띄우고 싶으면 직접 실행할 때 `--headless`를 추가하면 됩니다.
+
+## 튜닝 팁
+
+식재료가 잘 보이는데도 아래 로그가 반복되면 vote에 포함된 예측이 없다는 뜻입니다.
+
+```text
+[VOTE] ingredient skipped: max_conf=0.0% <= required=50.0%
+```
+
+이 경우 보통 bbox visible 조건이 너무 좁거나, confidence 기준이 아직 높은 상황입니다.
+
+- 더 많은 프레임을 vote에 포함하려면 `--ingredient-vote-visible-margin`을 낮춥니다.
+  - 예: `0.15 -> 0.10`
+- confidence 기준을 더 낮추려면 `--ingredient-vote-min-confidence`를 낮춥니다.
+  - 예: `0.50 -> 0.45`
+- 움직이는 물체가 너무 작아서 추적이 끊기면 `--direction-min-area`를 낮춥니다.
+  - 예: `1200 -> 800`
 
 ## 주요 파일
 
