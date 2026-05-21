@@ -154,6 +154,149 @@ class LoadedModel:
     vote_finalized: bool = False
 
 
+@dataclass
+class DirectionTracker:
+    enabled: bool
+    min_area: float
+    max_area_ratio: float
+    top_zone: float
+    bottom_zone: float
+    min_travel: float
+    lost_frames_required: int
+    min_track_frames: int
+    display_seconds: float
+    subtractor: Any = None
+    active: bool = False
+    points: list[tuple[float, float]] = field(default_factory=list)
+    lost_frames: int = 0
+    last_seen_t: float = 0.0
+    last_event: str = ""
+    event_until: float = 0.0
+    bbox: tuple[int, int, int, int] | None = None
+
+    def reset(self, clear_event: bool = False) -> None:
+        self.subtractor = None
+        self.active = False
+        self.points.clear()
+        self.lost_frames = 0
+        self.last_seen_t = 0.0
+        self.bbox = None
+        if clear_event:
+            self.last_event = ""
+            self.event_until = 0.0
+
+    def current_event(self, now: float) -> str:
+        if self.last_event and now <= self.event_until:
+            return self.last_event
+        return ""
+
+    def update(self, frame, now: float) -> str:
+        if not self.enabled:
+            return ""
+
+        import cv2
+
+        if self.subtractor is None:
+            self.subtractor = cv2.createBackgroundSubtractorMOG2(
+                history=80,
+                varThreshold=32,
+                detectShadows=False,
+            )
+
+        h, w = frame.shape[:2]
+        fgmask = self.subtractor.apply(frame)
+        _ret, mask = cv2.threshold(fgmask, 200, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.dilate(mask, kernel, iterations=2)
+
+        detected = self.detect_motion_center(mask, frame_area=float(h * w))
+        if detected is None:
+            if self.active:
+                self.lost_frames += 1
+                if self.lost_frames >= max(1, self.lost_frames_required):
+                    self.finalize_track(frame_height=h, now=now)
+                    self.active = False
+                    self.points.clear()
+                    self.lost_frames = 0
+                    self.bbox = None
+            return self.current_event(now)
+
+        center_x, center_y, bbox = detected
+        if not self.active:
+            self.active = True
+            self.points.clear()
+            self.lost_frames = 0
+
+        self.points.append((center_x, center_y))
+        self.last_seen_t = now
+        self.lost_frames = 0
+        self.bbox = bbox
+        return self.current_event(now)
+
+    def detect_motion_center(
+        self,
+        mask,
+        frame_area: float,
+    ) -> tuple[float, float, tuple[int, int, int, int]] | None:
+        import cv2
+
+        contours, _hierarchy = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+
+        max_area = frame_area * min(max(self.max_area_ratio, 0.01), 1.0)
+        candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area or area > max_area:
+                continue
+            candidates.append((area, contour))
+
+        if not candidates:
+            return None
+
+        _area, contour = max(candidates, key=lambda item: item[0])
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            return None
+
+        x, y, w, h = cv2.boundingRect(contour)
+        center_x = moments["m10"] / moments["m00"]
+        center_y = moments["m01"] / moments["m00"]
+        return center_x, center_y, (x, y, w, h)
+
+    def finalize_track(self, frame_height: int, now: float) -> str:
+        if len(self.points) < max(1, self.min_track_frames):
+            return ""
+
+        sample_n = min(3, len(self.points))
+        start_y = sum(point[1] for point in self.points[:sample_n]) / sample_n
+        end_y = sum(point[1] for point in self.points[-sample_n:]) / sample_n
+        travel = end_y - start_y
+
+        top_limit = frame_height * min(max(self.top_zone, 0.0), 1.0)
+        bottom_limit = frame_height * min(max(self.bottom_zone, 0.0), 1.0)
+        min_pixels = frame_height * min(max(self.min_travel, 0.0), 1.0)
+
+        event = ""
+        if start_y <= top_limit and end_y >= bottom_limit and travel >= min_pixels:
+            event = "input"
+        elif start_y >= bottom_limit and end_y <= top_limit and -travel >= min_pixels:
+            event = "output"
+
+        if event:
+            self.last_event = event
+            self.event_until = now + max(0.1, self.display_seconds)
+            print(
+                f"[DIRECTION] {event} "
+                f"start_y={start_y:.1f} end_y={end_y:.1f} travel={travel:.1f}"
+            )
+        return event
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -199,6 +342,19 @@ def parse_args() -> argparse.Namespace:
         default=0.85,
         help="POST an ingredient result only when the top confidence is at least this value.",
     )
+    parser.add_argument(
+        "--enable-ingredient-direction",
+        action="store_true",
+        help="Track vertical ingredient motion in state 2 and draw input/output on the CV window.",
+    )
+    parser.add_argument("--direction-min-area", type=float, default=1200.0)
+    parser.add_argument("--direction-max-area-ratio", type=float, default=0.60)
+    parser.add_argument("--direction-top-zone", type=float, default=0.35)
+    parser.add_argument("--direction-bottom-zone", type=float, default=0.65)
+    parser.add_argument("--direction-min-travel", type=float, default=0.25)
+    parser.add_argument("--direction-lost-frames", type=int, default=8)
+    parser.add_argument("--direction-min-track-frames", type=int, default=4)
+    parser.add_argument("--direction-display-seconds", type=float, default=2.5)
     parser.add_argument("--stable-frames", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--recognition-cooldown", type=float, default=2.0, help=argparse.SUPPRESS)
     parser.add_argument("--allow-repeat-recognition", action="store_true", help=argparse.SUPPRESS)
@@ -904,6 +1060,43 @@ def draw_overlay(
         )
 
 
+def draw_direction_label(frame, label: str) -> None:
+    if not label:
+        return
+
+    import cv2
+
+    h, w = frame.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.45
+    thickness = 3
+    (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+    x = max(8, (w - text_w) // 2)
+    y = min(h - 16, max(text_h + 16, int(h * 0.16)))
+
+    color = (80, 255, 120) if label == "input" else (0, 220, 255)
+    cv2.putText(
+        frame,
+        label,
+        (x, y),
+        font,
+        font_scale,
+        (0, 0, 0),
+        thickness + 4,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        label,
+        (x, y),
+        font,
+        font_scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
 def main() -> None:
     args = parse_args()
     os.chdir(PROJECT_ROOT)
@@ -974,6 +1167,17 @@ def main() -> None:
 
     cap = open_camera(args.camera, args.width, args.height)
     state = RuntimeState()
+    direction_tracker = DirectionTracker(
+        enabled=args.enable_ingredient_direction,
+        min_area=args.direction_min_area,
+        max_area_ratio=args.direction_max_area_ratio,
+        top_zone=args.direction_top_zone,
+        bottom_zone=args.direction_bottom_zone,
+        min_travel=args.direction_min_travel,
+        lost_frames_required=args.direction_lost_frames,
+        min_track_frames=args.direction_min_track_frames,
+        display_seconds=args.direction_display_seconds,
+    )
     lock = threading.Lock()
     stop_event = threading.Event()
     reader_thread = threading.Thread(
@@ -984,6 +1188,11 @@ def main() -> None:
     reader_thread.start()
 
     print("[INFO] state mapping: 0=Sleep, 1=Alcohol, 2=Ingredient")
+    if args.enable_ingredient_direction:
+        print(
+            "[INFO] ingredient direction tracker enabled: "
+            "top->bottom=input, bottom->top=output"
+        )
     print("[INFO] q=quit" if not args.headless else "[INFO] Ctrl+C=quit")
 
     frame_idx = 0
@@ -1045,6 +1254,12 @@ def main() -> None:
                     reset_runtime_model(models[active_mode])
                     if active_mode == MODE_LIQUOR:
                         start_liquor_vote(models[MODE_LIQUOR], now, pir_hold_until)
+                if args.enable_ingredient_direction:
+                    if last_mode == MODE_INGREDIENT and active_mode != MODE_INGREDIENT:
+                        direction_tracker.finalize_track(frame_height=frame.shape[0], now=now)
+                        direction_tracker.reset(clear_event=False)
+                    else:
+                        direction_tracker.reset(clear_event=True)
                 last_mode = active_mode
 
             should_infer = (
@@ -1072,6 +1287,10 @@ def main() -> None:
                             scan_request_id=args.scan_request_id,
                         )
 
+            direction_label = direction_tracker.current_event(now)
+            if args.enable_ingredient_direction and active_mode == MODE_INGREDIENT:
+                direction_label = direction_tracker.update(frame, now)
+
             if args.headless:
                 if active_mode in models and now - last_log_t >= args.print_every:
                     model = models[active_mode]
@@ -1095,6 +1314,7 @@ def main() -> None:
                 overlay_topk=args.overlay_topk,
                 overlay_alpha=args.overlay_alpha,
             )
+            draw_direction_label(display, direction_label)
             cv2.imshow(args.window_name, display)
 
             key = cv2.waitKey(1) & 0xFF

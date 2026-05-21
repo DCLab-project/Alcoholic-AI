@@ -39,6 +39,13 @@ Arduino가 보내는 센서 코드는 Jetson 내부 모드 전환에만 사용�
 - 상태 `2`에서 top confidence가 85% 이상인 첫 결과만 `/api/v1/recognitions/ingredients`로 POST합니다.
 - 같은 상태2 세션에서 반복 POST하지 않습니다.
 
+식재료 이동 방향 표시:
+
+- 상태 `2`에서만 OpenCV 움직임 추적을 켭니다.
+- 화면 위쪽에서 나타나 아래쪽으로 사라지면 `input`을 표시합니다.
+- 화면 아래쪽에서 나타나 위쪽으로 사라지면 `output`을 표시합니다.
+- 이 방향 표시는 BE POST와 별개로 CV 화면에만 표시됩니다.
+
 라벨 보정:
 
 - `leek`는 BE canonical key인 `green_onion`으로 전송합니다.
@@ -109,7 +116,8 @@ python3 src/common/main_controller.py \
   --enable-be-post \
   --be-base-url http://192.168.50.123:8000 \
   --pir-hold-seconds 5 \
-  --ingredient-post-threshold 0.85
+  --ingredient-post-threshold 0.85 \
+  --enable-ingredient-direction
 ```
 
 OpenCV 화면 없이 FE 웹 UI만 띄우고 싶으면 직접 실행할 때 `--headless`를 추가하면 됩니다.
