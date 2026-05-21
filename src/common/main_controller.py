@@ -152,6 +152,7 @@ class LoadedModel:
     vote_started_at: float = 0.0
     vote_deadline: float = 0.0
     vote_finalized: bool = False
+    vote_max_conf: float = 0.0
 
 
 @dataclass
@@ -173,6 +174,9 @@ class DirectionTracker:
     last_event: str = ""
     event_until: float = 0.0
     bbox: tuple[int, int, int, int] | None = None
+    started_this_frame: bool = False
+    finished_this_frame: bool = False
+    seen_this_frame: bool = False
 
     def reset(self, clear_event: bool = False) -> None:
         self.subtractor = None
@@ -181,6 +185,9 @@ class DirectionTracker:
         self.lost_frames = 0
         self.last_seen_t = 0.0
         self.bbox = None
+        self.started_this_frame = False
+        self.finished_this_frame = False
+        self.seen_this_frame = False
         if clear_event:
             self.last_event = ""
             self.event_until = 0.0
@@ -190,7 +197,21 @@ class DirectionTracker:
             return self.last_event
         return ""
 
+    def is_visible_for_vote(self, frame_shape, margin_ratio: float) -> bool:
+        if self.bbox is None:
+            return False
+
+        frame_h = frame_shape[0]
+        margin = frame_h * min(max(margin_ratio, 0.0), 0.45)
+        _x, y, _w, h = self.bbox
+        center_y = y + h / 2.0
+        return margin <= center_y <= (frame_h - margin)
+
     def update(self, frame, now: float) -> str:
+        self.started_this_frame = False
+        self.finished_this_frame = False
+        self.seen_this_frame = False
+
         if not self.enabled:
             return ""
 
@@ -220,6 +241,7 @@ class DirectionTracker:
                     self.points.clear()
                     self.lost_frames = 0
                     self.bbox = None
+                    self.finished_this_frame = True
             return self.current_event(now)
 
         center_x, center_y, bbox = detected
@@ -227,11 +249,13 @@ class DirectionTracker:
             self.active = True
             self.points.clear()
             self.lost_frames = 0
+            self.started_this_frame = True
 
         self.points.append((center_x, center_y))
         self.last_seen_t = now
         self.lost_frames = 0
         self.bbox = bbox
+        self.seen_this_frame = True
         return self.current_event(now)
 
     def detect_motion_center(
@@ -337,12 +361,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sensor-source", default="arduino")
     parser.add_argument("--post-timeout", type=float, default=2.0)
     parser.add_argument(
-        "--ingredient-post-threshold",
-        type=float,
-        default=0.85,
-        help="POST an ingredient result only when the top confidence is at least this value.",
-    )
-    parser.add_argument(
         "--enable-ingredient-direction",
         action="store_true",
         help="Track vertical ingredient motion in state 2 and draw input/output on the CV window.",
@@ -355,6 +373,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--direction-lost-frames", type=int, default=8)
     parser.add_argument("--direction-min-track-frames", type=int, default=4)
     parser.add_argument("--direction-display-seconds", type=float, default=2.5)
+    parser.add_argument(
+        "--ingredient-vote-min-confidence",
+        type=float,
+        default=0.50,
+        help=(
+            "Include an ingredient prediction in the tracking vote only when "
+            "its top-1 confidence is above this value."
+        ),
+    )
+    parser.add_argument(
+        "--ingredient-vote-visible-margin",
+        type=float,
+        default=0.15,
+        help=(
+            "Include an ingredient prediction in the tracking vote only when "
+            "the tracked bbox is inside this top/bottom frame margin."
+        ),
+    )
     parser.add_argument("--stable-frames", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument("--recognition-cooldown", type=float, default=2.0, help=argparse.SUPPRESS)
     parser.add_argument("--allow-repeat-recognition", action="store_true", help=argparse.SUPPRESS)
@@ -821,6 +857,7 @@ def reset_runtime_model(runtime_model: LoadedModel) -> None:
     runtime_model.vote_started_at = 0.0
     runtime_model.vote_deadline = 0.0
     runtime_model.vote_finalized = False
+    runtime_model.vote_max_conf = 0.0
 
 
 def start_liquor_vote(runtime_model: LoadedModel, now: float, deadline: float) -> None:
@@ -829,21 +866,51 @@ def start_liquor_vote(runtime_model: LoadedModel, now: float, deadline: float) -
     runtime_model.vote_started_at = now
     runtime_model.vote_deadline = deadline
     runtime_model.vote_finalized = False
+    runtime_model.vote_max_conf = 0.0
 
 
-def record_liquor_vote(runtime_model: LoadedModel) -> None:
+def start_ingredient_vote(runtime_model: LoadedModel, now: float) -> None:
+    runtime_model.vote_counts.clear()
+    runtime_model.vote_conf_sums.clear()
+    runtime_model.vote_started_at = now
+    runtime_model.vote_deadline = 0.0
+    runtime_model.vote_finalized = False
+    runtime_model.vote_max_conf = 0.0
+    runtime_model.last_sent_label = None
+    runtime_model.last_sent_time = 0.0
+    print("[VOTE] ingredient tracking started")
+
+
+def record_top1_vote(
+    runtime_model: LoadedModel,
+    mode: str,
+    min_confidence: float | None = None,
+) -> bool:
     if not runtime_model.last_topk:
-        return
+        return False
 
     top_label, top_conf = runtime_model.last_topk[0]
-    canonical_label = canonicalize_label(MODE_LIQUOR, top_label)
+    runtime_model.vote_max_conf = max(runtime_model.vote_max_conf, top_conf)
+    if min_confidence is not None and top_conf <= min_confidence:
+        return False
+
+    canonical_label = canonicalize_label(mode, top_label)
     runtime_model.vote_counts[canonical_label] += 1
     runtime_model.vote_conf_sums[canonical_label] = (
         runtime_model.vote_conf_sums.get(canonical_label, 0.0) + top_conf
     )
+    return True
 
 
-def liquor_vote_winner(runtime_model: LoadedModel) -> tuple[str, int, int, float] | None:
+def record_liquor_vote(runtime_model: LoadedModel) -> None:
+    record_top1_vote(runtime_model, MODE_LIQUOR)
+
+
+def record_ingredient_vote(runtime_model: LoadedModel, min_confidence: float) -> None:
+    record_top1_vote(runtime_model, MODE_INGREDIENT, min_confidence=min_confidence)
+
+
+def vote_winner(runtime_model: LoadedModel) -> tuple[str, int, int, float] | None:
     total = sum(runtime_model.vote_counts.values())
     if total <= 0:
         return None
@@ -871,7 +938,7 @@ def maybe_finalize_liquor_vote(
         return
 
     runtime_model.vote_finalized = True
-    winner = liquor_vote_winner(runtime_model)
+    winner = vote_winner(runtime_model)
     if winner is None:
         print("[VOTE] liquor skipped: no predictions collected")
         return
@@ -888,6 +955,46 @@ def maybe_finalize_liquor_vote(
     runtime_model.last_sent_time = now
     print(
         f"[VOTE] liquor winner={label} votes={count}/{total} "
+        f"avg_conf={confidence * 100:.1f}%"
+    )
+
+
+def maybe_finalize_ingredient_vote(
+    runtime_model: LoadedModel,
+    post_queue: queue.Queue[tuple[str, str, dict[str, Any]]] | None,
+    ingredient_url: str,
+    scan_request_id: str,
+    min_confidence: float,
+    now: float,
+) -> None:
+    if runtime_model.vote_finalized:
+        return
+
+    runtime_model.vote_finalized = True
+    if runtime_model.vote_max_conf <= min_confidence:
+        print(
+            f"[VOTE] ingredient skipped: max_conf={runtime_model.vote_max_conf * 100:.1f}% "
+            f"<= required={min_confidence * 100:.1f}%"
+        )
+        return
+
+    winner = vote_winner(runtime_model)
+    if winner is None:
+        print("[VOTE] ingredient skipped: no predictions collected")
+        return
+
+    label, count, total, confidence = winner
+    _endpoint_kind, payload = make_recognition_payload(
+        mode=MODE_INGREDIENT,
+        label=label,
+        confidence=confidence,
+        scan_request_id=scan_request_id,
+    )
+    enqueue_post(post_queue, "recognition:ingredient", ingredient_url, payload)
+    runtime_model.last_sent_label = label
+    runtime_model.last_sent_time = now
+    print(
+        f"[VOTE] ingredient winner={label} votes={count}/{total} "
         f"avg_conf={confidence * 100:.1f}%"
     )
 
@@ -937,39 +1044,6 @@ def run_inference(
     top_label, top_conf = runtime_model.last_topk[0]
     runtime_model.last_label = top_label if top_conf >= threshold else "uncertain"
     runtime_model.last_conf = top_conf
-
-
-def maybe_enqueue_ingredient_recognition(
-    runtime_model: LoadedModel,
-    post_queue: queue.Queue[tuple[str, str, dict[str, Any]]] | None,
-    ingredient_url: str,
-    threshold: float,
-    scan_request_id: str,
-) -> None:
-    if not runtime_model.last_topk:
-        return
-
-    top_label, top_conf = runtime_model.last_topk[0]
-    now = time.time()
-
-    if top_conf < threshold:
-        return
-
-    if runtime_model.last_sent_label is not None:
-        return
-
-    canonical_label = canonicalize_label(MODE_INGREDIENT, top_label)
-    _endpoint_kind, payload = make_recognition_payload(
-        mode=MODE_INGREDIENT,
-        label=top_label,
-        confidence=top_conf,
-        scan_request_id=scan_request_id,
-    )
-    enqueue_post(post_queue, "recognition:ingredient", ingredient_url, payload)
-
-    runtime_model.last_sent_label = canonical_label
-    runtime_model.last_sent_time = now
-    print(f"[POST READY] ingredient={canonical_label} conf={top_conf * 100:.1f}%")
 
 
 def shorten(text: str, max_chars: int = 34) -> str:
@@ -1257,10 +1331,34 @@ def main() -> None:
                 if args.enable_ingredient_direction:
                     if last_mode == MODE_INGREDIENT and active_mode != MODE_INGREDIENT:
                         direction_tracker.finalize_track(frame_height=frame.shape[0], now=now)
+                        if args.enable_be_post:
+                            maybe_finalize_ingredient_vote(
+                                runtime_model=models[MODE_INGREDIENT],
+                                post_queue=post_queue,
+                                ingredient_url=ingredient_recognition_url,
+                                scan_request_id=args.scan_request_id,
+                                min_confidence=args.ingredient_vote_min_confidence,
+                                now=now,
+                            )
                         direction_tracker.reset(clear_event=False)
                     else:
                         direction_tracker.reset(clear_event=True)
                 last_mode = active_mode
+
+            direction_label = direction_tracker.current_event(now)
+            if args.enable_ingredient_direction and active_mode == MODE_INGREDIENT:
+                direction_label = direction_tracker.update(frame, now)
+                if direction_tracker.started_this_frame:
+                    start_ingredient_vote(models[MODE_INGREDIENT], now)
+                if direction_tracker.finished_this_frame and args.enable_be_post:
+                    maybe_finalize_ingredient_vote(
+                        runtime_model=models[MODE_INGREDIENT],
+                        post_queue=post_queue,
+                        ingredient_url=ingredient_recognition_url,
+                        scan_request_id=args.scan_request_id,
+                        min_confidence=args.ingredient_vote_min_confidence,
+                        now=now,
+                    )
 
             should_infer = (
                 active_mode in models
@@ -1278,18 +1376,19 @@ def main() -> None:
                 if args.enable_be_post:
                     if active_mode == MODE_LIQUOR:
                         record_liquor_vote(models[MODE_LIQUOR])
-                    elif active_mode == MODE_INGREDIENT:
-                        maybe_enqueue_ingredient_recognition(
-                            runtime_model=models[MODE_INGREDIENT],
-                            post_queue=post_queue,
-                            ingredient_url=ingredient_recognition_url,
-                            threshold=args.ingredient_post_threshold,
-                            scan_request_id=args.scan_request_id,
+                    elif (
+                        active_mode == MODE_INGREDIENT
+                        and args.enable_ingredient_direction
+                        and direction_tracker.active
+                        and direction_tracker.is_visible_for_vote(
+                            frame.shape,
+                            args.ingredient_vote_visible_margin,
                         )
-
-            direction_label = direction_tracker.current_event(now)
-            if args.enable_ingredient_direction and active_mode == MODE_INGREDIENT:
-                direction_label = direction_tracker.update(frame, now)
+                    ):
+                        record_ingredient_vote(
+                            models[MODE_INGREDIENT],
+                            min_confidence=args.ingredient_vote_min_confidence,
+                        )
 
             if args.headless:
                 if active_mode in models and now - last_log_t >= args.print_every:

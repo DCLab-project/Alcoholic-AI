@@ -9,5 +9,6 @@ python3 src/common/main_controller.py \
   --enable-be-post \
   --be-base-url http://192.168.50.123:8000 \
   --pir-hold-seconds 5 \
-  --ingredient-post-threshold 0.85 \
-  --enable-ingredient-direction
+  --enable-ingredient-direction \
+  --ingredient-vote-min-confidence 0.50 \
+  --ingredient-vote-visible-margin 0.15
